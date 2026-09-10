@@ -1,0 +1,15 @@
+psutil>=5.9
+pytest>=7.0
+
+# Not needed yet -- add these when you build the real agent layer
+# (Phase IV) and the API/dashboard (Phase VI):
+# langgraph
+# langchain-core
+# groq              # or openai / google-generativeai, pick one provider
+# fastapi
+# uvicorn
+# streamlit
+# python-dotenv
+# objgraph
+# pandas
+# numpy
