@@ -9,9 +9,15 @@ synchronously into the regular sampling loop. This is NOT a threading lock
 only job is to let us tag samples as "observation" vs "action_pre" /
 "action_post" so before/after comparisons aren't contaminated by
 regular sampling noise.
+
+BACKEND SWAP: `gc_module` defaults to the real interpreter's `gc`, but
+accepts any module shaped the same way -- in particular, our own
+`custom_gc` package (see custom_gc/heap.py), which implements a real
+mark-sweep collector from scratch. Nothing else in this file needs to
+know or care which one it's talking to.
 """
 
-import gc
+import gc as _real_gc
 import os
 import time
 import tracemalloc
@@ -20,13 +26,23 @@ import psutil
 
 
 class Monitor:
-    def __init__(self, sample_interval=0.3):
+    def __init__(self, sample_interval=0.3, gc_module=None):
         self.sample_interval = sample_interval
         self.action_in_progress = False
         self.samples = []
         self.process = psutil.Process(os.getpid())
 
+        # Backend selection happens once, here. gc_module=None (default)
+        # keeps existing behavior (real interpreter gc) unchanged for
+        # every workload built before this change.
+        self.gc_module = gc_module if gc_module is not None else _real_gc
+
         # tracemalloc must be started before any snapshot calls work.
+        # Note: tracemalloc/psutil always measure the REAL Python
+        # process, regardless of gc_module -- when using custom_gc, these
+        # numbers reflect the overhead of our GCObject instances (still
+        # real Python objects under the hood), not a separate "simulated"
+        # memory space. That's expected, not a bug.
         if not tracemalloc.is_tracing():
             tracemalloc.start()
 
@@ -37,15 +53,27 @@ class Monitor:
         doing its normal thing" from "the actuator just did something."
         """
         current, peak = tracemalloc.get_traced_memory()
+        gc_stats = self.gc_module.get_stats()
+
+        # Sum of "uncollectable" across all 3 generations. This counts
+        # objects the collector found in a cycle but could NOT free
+        # (usually because they define __del__). A rising number here is
+        # a much stronger cycle signal than growth rate alone -- growth
+        # can come from a healthy cache too, but uncollectable objects
+        # are specifically the reference-cycle problem. (With
+        # custom_gc, this always stays 0 -- see custom_gc/__init__.py.)
+        uncollectable_total = sum(g["uncollectable"] for g in gc_stats)
 
         snapshot = {
             "timestamp": time.time(),
             "tag": tag,
-            "gc_counts": gc.get_count(),        # (gen0, gen1, gen2) collection counters
-            "gc_stats": gc.get_stats(),          # per-generation collection stats
+            "gc_counts": self.gc_module.get_count(),   # (gen0, gen1, gen2) collection counters
+            "gc_stats": gc_stats,                        # per-generation collection stats
             "traced_current_bytes": current,     # tracemalloc: current traced allocations
             "traced_peak_bytes": peak,           # tracemalloc: peak since start/reset
             "rss_bytes": self.process.memory_info().rss,  # OS-level resident memory
+            "live_object_count": len(self.gc_module.get_objects()),  # total tracked objects right now
+            "uncollectable_total": uncollectable_total,
         }
         self.samples.append(snapshot)
         return snapshot

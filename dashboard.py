@@ -21,51 +21,75 @@ file_path = LOG_FILES[selected_workload]
 # Function to parse the .jsonl logs
 def load_data(path):
     if not os.path.exists(path):
-        return pd.DataFrame(), pd.DataFrame()
-    
+        return pd.DataFrame(), pd.DataFrame(), None
+
     raw_logs = []
     timeline_data = []
-    
+    run_summary = None
+
     with open(path, 'r') as f:
         for line in f:
-            if line.strip():
-                record = json.loads(line)
-                
-                # For raw logs table
-                raw_logs.append({
-                    "Timestamp": datetime.fromtimestamp(record["pre"]["timestamp"]).strftime('%H:%M:%S'),
-                    "Action": record["decision"]["action"],
-                    "Reason": record["decision"]["reason"],
-                    "Objects Collected": record["result"]["objects_collected"],
-                    "Mem Drop (Bytes)": record["pre"]["traced_current_bytes"] - record["post"]["traced_current_bytes"]
-                })
-                
-                # For Plotly Graph (creating a drop effect)
-                # Point 1: Just before action
-                timeline_data.append({
-                    "Time": datetime.fromtimestamp(record["pre"]["timestamp"]),
-                    "Memory": record["pre"]["traced_current_bytes"],
-                    "RSS": record["pre"]["rss_bytes"],
-                    "State": "Pre-Action",
-                    "Hover": record["decision"]["reason"]
-                })
-                # Point 2: Just after action
-                timeline_data.append({
-                    "Time": datetime.fromtimestamp(record["post"]["timestamp"]),
-                    "Memory": record["post"]["traced_current_bytes"],
-                    "RSS": record["post"]["rss_bytes"],
-                    "State": "Post-Action",
-                    "Hover": f"Collected: {record['result']['objects_collected']} objects"
-                })
+            if not line.strip():
+                continue
+            record = json.loads(line)
 
-    return pd.DataFrame(raw_logs), pd.DataFrame(timeline_data)
+            # Our actuator writes one run_summary line per run (always,
+            # even with zero interventions) alongside zero-or-more action
+            # records. It has no "pre"/"post"/"decision" keys, so it must
+            # be handled separately rather than assumed to be an action.
+            if record.get("type") == "run_summary":
+                run_summary = record
+                continue
+
+            # Different actions return different result shapes:
+            # collect -> {"objects_collected": N}
+            # tune_threshold -> {"requested_threshold": N, "applied_threshold": N}
+            # flag_cycle -> {"flagged": True}
+            # Use .get() with a default so the table doesn't crash on
+            # whichever action shape isn't "collect".
+            objects_collected = record["result"].get("objects_collected", 0)
+
+            raw_logs.append({
+                "Timestamp": datetime.fromtimestamp(record["pre"]["timestamp"]).strftime('%H:%M:%S'),
+                "Action": record["decision"]["action"],
+                "Reason": record["decision"]["reason"],
+                "Objects Collected": objects_collected,
+                "Mem Drop (Bytes)": record["pre"]["traced_current_bytes"] - record["post"]["traced_current_bytes"]
+            })
+
+            timeline_data.append({
+                "Time": datetime.fromtimestamp(record["pre"]["timestamp"]),
+                "Memory": record["pre"]["traced_current_bytes"],
+                "RSS": record["pre"]["rss_bytes"],
+                "State": "Pre-Action",
+                "Hover": record["decision"]["reason"]
+            })
+            timeline_data.append({
+                "Time": datetime.fromtimestamp(record["post"]["timestamp"]),
+                "Memory": record["post"]["traced_current_bytes"],
+                "RSS": record["post"]["rss_bytes"],
+                "State": "Post-Action",
+                "Hover": f"Result: {record['result']}"
+            })
+
+    return pd.DataFrame(raw_logs), pd.DataFrame(timeline_data), run_summary
 
 st.title(f"📊 Memory Analysis: {selected_workload}")
 
-df_logs, df_timeline = load_data(file_path)
+df_logs, df_timeline, run_summary = load_data(file_path)
 
-if df_logs.empty:
+if run_summary is None and df_logs.empty:
+    # No file / no run_summary at all -- genuinely hasn't been run yet.
     st.warning(f"No log data found for {selected_workload}. Run `python main.py` first.")
+elif df_logs.empty:
+    # A run_summary exists but zero actions were logged. This is the
+    # correct, healthy outcome for a workload like normal_churn -- it
+    # should be shown as a clean result, not treated as missing data.
+    st.success(
+        f"Run completed with **zero interventions** -- "
+        f"{run_summary['total_observations']} observations, no actions needed. "
+        f"This is the expected result for a healthy workload."
+    )
 else:
     # --- KPIs ---
     total_actions = len(df_logs)

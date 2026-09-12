@@ -33,9 +33,13 @@ def run_experiment(workload_module, label, iterations=100, sample_interval=0.1):
     obs = [s for s in monitor.samples if s["tag"] == "observation"]
     actions = [s for s in monitor.samples if s["tag"] == "action_pre"]
 
+    # Always write a summary line, so the log file has proof of the run
+    # even when zero actions fired (the correct outcome for normal_churn).
+    actuator.log_run_summary(label, len(obs), len(actions))
+
     print(f"  observation samples: {len(obs)}")
     print(f"  actuator actions taken: {len(actions)}")
-    print(f"  log written to {label}_log.jsonl")
+    print(f"  log written to {label}_log.jsonl (file always created now)")
     print()
 
 
