@@ -1,9 +1,6 @@
 """
-Applies agent decisions to the real interpreter (gc.collect,
-gc.set_threshold) and logs every action as a structured before/after
-record. This is the module where a bug is most dangerous -- it's the one
-place code here can actually change interpreter-wide state -- so bounds
-are enforced here even though the agent is also expected to be sensible.
+Applies agent decisions to the runtime (gc.collect, gc.set_threshold, cache eviction)
+under strict safety bounds and logs every action as a structured before/after record.
 """
 
 import gc as _real_gc
@@ -12,43 +9,50 @@ import time
 
 
 class Actuator:
-    def __init__(self, log_path="run_log.jsonl", threshold_bounds=(100, 100_000), gc_module=None):
+    def __init__(self, log_path="run_log.jsonl", threshold_bounds=(100, 100_000), gc_module=None, workload_module=None):
         self.log_path = log_path
         self.threshold_bounds = threshold_bounds  # (min, max) for gc.set_threshold
-
-        # Same backend-swap pattern as Monitor: defaults to real gc,
-        # accepts custom_gc (or anything else shaped the same way).
         self.gc_module = gc_module if gc_module is not None else _real_gc
+        self.workload_module = workload_module
 
-        # Always create the file up front, even if this run never takes
-        # an action. Previously the file was only created on the first
-        # log_event() call, so a workload that correctly triggers zero
-        # interventions (e.g. normal_churn) produced no file at all --
-        # which looked like a bug/missing run rather than a clean result.
+        # Ensure the log file is created up front
         open(self.log_path, "w").close()
 
-    def apply(self, decision):
+    def set_workload_module(self, workload_module):
+        self.workload_module = workload_module
+
+    def apply(self, decision, workload_module=None):
         action = decision.get("action")
+        target_workload = workload_module or self.workload_module
 
         if action == "collect":
             freed = self.gc_module.collect()
             return {"objects_collected": freed}
 
+        elif action == "evict_cache":
+            ratio = decision.get("evict_ratio", 0.5)
+            evicted = 0
+            if target_workload and hasattr(target_workload, "evict"):
+                evicted = target_workload.evict(ratio=ratio)
+            # Sweep to reclaim newly unreferenced objects
+            freed = self.gc_module.collect()
+            return {
+                "evicted_items": evicted,
+                "objects_collected": freed,
+            }
+
         elif action == "tune_threshold":
             requested = decision.get("threshold", 700)
             low, high = self.threshold_bounds
-            # Hard clamp -- this is the safety rail, not a suggestion.
-            # An LLM-driven decision that requests threshold=1 (which
-            # would make GC run almost continuously) gets clamped here
-            # regardless of what the agent asked for.
             bounded = max(low, min(high, requested))
             self.gc_module.set_threshold(bounded)
             return {"requested_threshold": requested, "applied_threshold": bounded}
 
+        elif action == "flag_unbounded_cache":
+            return {"flagged": True, "type": "unbounded_cache_leak"}
+
         elif action == "flag_cycle":
-            # No interpreter state change -- just a marker for the log/
-            # dashboard that the agent believes a cycle is present.
-            return {"flagged": True}
+            return {"flagged": True, "type": "cyclic_leak"}
 
         else:
             return {"noop": True}
@@ -72,12 +76,6 @@ class Actuator:
             f.write(json.dumps(record) + "\n")
 
     def log_run_summary(self, label, total_observations, total_actions):
-        """
-        Written once at the end of a run, regardless of whether any
-        actions fired. This guarantees every workload's log file has at
-        least one line -- proof the run happened, even for a baseline
-        like normal_churn that should trigger zero interventions.
-        """
         summary = {
             "type": "run_summary",
             "label": label,
