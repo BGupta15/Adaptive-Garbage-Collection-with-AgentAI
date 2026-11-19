@@ -2,9 +2,22 @@
 In-process monitor: samples gc/tracemalloc/psutil state while a workload
 generator runs, interleaved on the same thread.
 
-Actuator actions are isolated with an explicit `action_in_progress` flag
-so pre/post intervention samples are distinctly tagged and do not contaminate
-the regular observation window.
+Key design decision: actuator actions are isolated with an explicit
+`action_in_progress` flag rather than mixed synchronously into the regular
+sampling loop. This is NOT a threading lock -- there's no concurrency here,
+it's a single-threaded state guard whose only job is to let us tag samples
+as "observation" vs "action_pre" / "action_post" so before/after comparisons
+aren't contaminated by regular sampling noise.
+
+OVERHEAD FIX (from friend's review): every stored sample retains ~1.6 KB of
+tracemalloc-traced memory. Without subtracting this, every workload -- even a
+perfectly healthy one -- shows fake steady growth of ~16 KB/s. The monitor now
+tracks and subtracts its own overhead so the numbers seen by the analysis and
+agent reflect the WORKLOAD's memory, not the monitor's bookkeeping.
+
+BACKEND SWAP: `gc_module` defaults to the real interpreter's `gc`, but
+accepts any module shaped the same way -- in particular, our own
+`custom_gc` package (see custom_gc/heap.py).
 """
 
 import gc as _real_gc
@@ -21,14 +34,26 @@ class Monitor:
         self.action_in_progress = False
         self.samples = []
         self.process = psutil.Process(os.getpid())
+
+        # Bytes of traced memory the monitor itself has retained by storing
+        # samples. tracemalloc is process-wide, so without subtracting this,
+        # EVERY workload -- even a healthy one -- shows steady fake "growth"
+        # equal to the monitor's own bookkeeping (~16 KB/s at 100ms interval).
+        self._self_overhead_bytes = 0
+
         self.gc_module = gc_module if gc_module is not None else _real_gc
 
         if not tracemalloc.is_tracing():
             tracemalloc.start()
 
     def sample(self, tag="observation"):
+        """
+        tag is one of: "observation", "action_pre", "action_post".
+        """
         current, peak = tracemalloc.get_traced_memory()
+        overhead_so_far = self._self_overhead_bytes
         gc_stats = self.gc_module.get_stats()
+
         uncollectable_total = sum(g.get("uncollectable", 0) for g in gc_stats)
 
         snapshot = {
@@ -36,18 +61,30 @@ class Monitor:
             "tag": tag,
             "gc_counts": self.gc_module.get_count(),
             "gc_stats": gc_stats,
-            "traced_current_bytes": current,
-            "traced_peak_bytes": peak,
+            # Net of the monitor's own stored-sample overhead
+            "traced_current_bytes": max(0, current - overhead_so_far),
+            "traced_peak_bytes": max(0, peak - overhead_so_far),
             "rss_bytes": self.process.memory_info().rss,
             "live_object_count": len(self.gc_module.get_objects()),
             "uncollectable_total": uncollectable_total,
         }
         self.samples.append(snapshot)
+
+        # Whatever tracemalloc grew by since the start of this call is
+        # what storing this sample cost (transient temporaries are already
+        # freed by now, so this is just the dict we appended).
+        self._self_overhead_bytes += tracemalloc.get_traced_memory()[0] - current
         return snapshot
 
-    def run(self, workload_gen, agent_decide_fn, actuator, max_steps=200, workload_module=None, workload_name=None):
+    def run(self, workload_gen, agent_decide_fn, actuator, max_steps=200,
+            workload_module=None, workload_name=None):
         """
-        Runs the interleaved monitor-agent-actuator loop.
+        workload_gen: a generator that yields periodically
+        agent_decide_fn: callable(samples, **kwargs) -> decision dict
+        actuator: an Actuator instance
+        max_steps: safety cap so a run always terminates
+        workload_module: passed through to actuator for evict actions
+        workload_name: passed through to agent for context
         """
         for _workload_step_info in workload_gen:
             if self.action_in_progress:
@@ -69,6 +106,9 @@ class Monitor:
                 break
 
     def _apply_action(self, decision, actuator, workload_module=None):
+        """
+        Isolation boundary: flag up, pre-snapshot, apply, post-snapshot, log, flag down.
+        """
         self.action_in_progress = True
         try:
             pre = self.sample(tag="action_pre")
@@ -76,7 +116,7 @@ class Monitor:
             post = self.sample(tag="action_post")
             actuator.log_event(decision, pre, post, result)
 
-            # Give feedback to the agent so it learns the real impact of its intervention
+            # Feed outcome back to the agentic layer so it learns efficacy
             try:
                 from agent.agentic_gc import get_agent
                 agent = get_agent()

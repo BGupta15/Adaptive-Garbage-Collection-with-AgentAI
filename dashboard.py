@@ -7,13 +7,22 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 # Import backend modules for live interactive runs
-from workloads import cycle_generator, unbounded_cache, normal_churn
-from workloads import cycle_generator_custom, unbounded_cache_custom, normal_churn_custom
+from workloads import (
+    cycle_generator,
+    unbounded_cache,
+    normal_churn,
+    slow_leak,
+    bursty,
+    cycle_generator_custom,
+    unbounded_cache_custom,
+    normal_churn_custom,
+)
 import custom_gc
 from monitor.monitor import Monitor
 from analysis.analysis import analyze
 from agent.agentic_gc import AgenticGCAgent
 from actuator.actuator import Actuator
+from evaluator.evaluate import compare, GROUND_TRUTH
 
 st.set_page_config(
     page_title="Agentic GC: Adaptive Memory Management",
@@ -22,11 +31,18 @@ st.set_page_config(
 )
 
 st.title("🧠 Adaptive Garbage Collection with Agent AI")
-st.caption("Autonomous memory profiling, cyclic GC optimization, and Human-in-the-Loop (HITL) cache governance.")
+st.caption("Autonomous memory profiling, cyclic GC optimization, OLS trend analysis, and Human-in-the-Loop (HITL) cache governance.")
 
 # Sidebar navigation
 st.sidebar.title("⚙️ Control Panel")
-mode = st.sidebar.radio("Dashboard Mode", ["🎮 Live Interactive Experiment", "📁 View Past Audit Logs"])
+mode = st.sidebar.radio(
+    "Dashboard Mode",
+    [
+        "🎮 Live Interactive Experiment",
+        "📁 View Past Audit Logs",
+        "🏆 Benchmark Evaluator",
+    ],
+)
 
 # -----------------------------------------------------------------------------
 # MODE 1: LIVE INTERACTIVE RUN (WITH REAL HITL BUTTONS)
@@ -45,13 +61,18 @@ if mode == "🎮 Live Interactive Experiment":
         selected_workload = st.selectbox(
             "Select Target Workload",
             [
-                "Unbounded Cache (Live Leak)",
+                "Unbounded Cache (Live Retention Leak)",
                 "Cycle Generator (Circular References)",
                 "Normal Churn (Healthy Baseline)",
+                "Slow Leak (Subtle Retention)",
+                "Bursty Allocations (Temporary Spikes)",
             ],
         )
     with colB:
-        backend_choice = st.selectbox("GC Runtime Engine", ["Python Built-in GC", "From-Scratch Custom Mark-Sweep"])
+        backend_choice = st.selectbox(
+            "GC Runtime Engine",
+            ["Python Built-in GC", "From-Scratch Custom Mark-Sweep"],
+        )
     with colC:
         hitl_behavior = st.selectbox(
             "Human-in-the-Loop (HITL) Policy",
@@ -64,7 +85,7 @@ if mode == "🎮 Live Interactive Experiment":
 
     # Initialize session state for interactive flow
     if "sim_status" not in st.session_state:
-        st.session_state.sim_status = "idle"  # 'idle', 'running', 'paused_hitl', 'completed'
+        st.session_state.sim_status = "idle"
     if "live_samples" not in st.session_state:
         st.session_state.live_samples = []
     if "live_logs" not in st.session_state:
@@ -90,6 +111,12 @@ if mode == "🎮 Live Interactive Experiment":
         elif "Cycle" in selected_workload:
             mod = cycle_generator_custom if is_custom else cycle_generator
             label = "cycle_generator_custom" if is_custom else "cycle_generator"
+        elif "Slow" in selected_workload:
+            mod = slow_leak
+            label = "slow_leak"
+        elif "Bursty" in selected_workload:
+            mod = bursty
+            label = "bursty"
         else:
             mod = normal_churn_custom if is_custom else normal_churn
             label = "normal_churn_custom" if is_custom else "normal_churn"
@@ -98,7 +125,7 @@ if mode == "🎮 Live Interactive Experiment":
         if is_custom:
             custom_gc.get_heap().reset()
 
-        agent = AgenticGCAgent(hitl_mode="interactive")
+        agent = AgenticGCAgent(hitl_mode="ui_manual")
         agent.reset()
         monitor = Monitor(sample_interval=0.01, gc_module=gc_mod)
         actuator = Actuator(log_path=f"live_{label}_log.jsonl", gc_module=gc_mod, workload_module=mod)
@@ -125,7 +152,6 @@ if mode == "🎮 Live Interactive Experiment":
                 st.session_state.pending_hitl = None
                 st.rerun()
 
-    # Chart & Metrics Containers
     metrics_placeholder = st.empty()
     chart_placeholder = st.empty()
     hitl_placeholder = st.empty()
@@ -148,7 +174,6 @@ if mode == "🎮 Live Interactive Experiment":
                 m3.metric("Reclaimed Objects", f"{reclaimed:,}")
                 m4.metric("HITL Approvals", hitl_actions)
 
-            # Build timeline chart
             times = [datetime.fromtimestamp(s["timestamp"]) for s in samples]
             mems = [s["traced_current_bytes"] / 1024 for s in samples]
 
@@ -161,7 +186,6 @@ if mode == "🎮 Live Interactive Experiment":
                 line=dict(color="#00e5ff", width=2.5),
             ))
 
-            # Mark intervention points
             for l in logs:
                 action_color = "#34c759" if "Approved" in l["HITL Governance"] else "#ff3b30"
                 fig.add_trace(go.Scatter(
@@ -187,7 +211,6 @@ if mode == "🎮 Live Interactive Experiment":
             df = pd.DataFrame(logs)[["Timestamp", "Diagnosis", "Action", "HITL Governance", "Items Reclaimed", "Memory Reclaimed (KB)", "Agent Reason"]]
             table_placeholder.dataframe(df, use_container_width=True)
 
-    # Execution Loop
     if st.session_state.sim_status == "running":
         monitor = st.session_state.live_monitor
         agent = st.session_state.live_agent
@@ -197,7 +220,7 @@ if mode == "🎮 Live Interactive Experiment":
         label = st.session_state.workload_label
 
         try:
-            for _ in range(4):  # run 4 steps per frame for smooth animation
+            for _ in range(4):
                 _step_info = next(gen)
                 snap = monitor.sample(tag="observation")
                 st.session_state.live_samples.append(snap)
@@ -209,7 +232,6 @@ if mode == "🎮 Live Interactive Experiment":
                 )
 
                 if decision.get("action") == "evict_cache" and hitl_behavior == "Manual (Ask me on screen via buttons)":
-                    # PAUSE FOR HUMAN INTERACTION!
                     st.session_state.pending_hitl = {
                         "decision": decision,
                         "diagnosis": decision.get("diagnosis", "UNBOUNDED_RETENTION_LEAK"),
@@ -220,7 +242,6 @@ if mode == "🎮 Live Interactive Experiment":
                     st.rerun()
 
                 elif decision.get("action") != "noop":
-                    # Execute automated or pre-configured action
                     if decision.get("action") == "evict_cache":
                         if hitl_behavior == "Simulated Auto-Reject":
                             decision["action"] = "flag_unbounded_cache"
@@ -257,7 +278,6 @@ if mode == "🎮 Live Interactive Experiment":
             render_live_dashboard()
             st.success("🎉 Simulation run completed! All observation steps processed.")
 
-    # Render HITL Decision Box when paused
     if st.session_state.sim_status == "paused_hitl":
         render_live_dashboard()
         info = st.session_state.pending_hitl
@@ -272,7 +292,6 @@ if mode == "🎮 Live Interactive Experiment":
             col_yes, col_no = st.columns(2)
             with col_yes:
                 if st.button("✅ APPROVE CACHE EVICTION (Purge 50%)", type="primary", use_container_width=True):
-                    # Operator Approved
                     monitor = st.session_state.live_monitor
                     actuator = st.session_state.live_actuator
                     mod = st.session_state.live_workload_module
@@ -305,7 +324,6 @@ if mode == "🎮 Live Interactive Experiment":
 
             with col_no:
                 if st.button("❌ REJECT INTERVENTION (Do Not Evict)", use_container_width=True):
-                    # Operator Rejected
                     decision = info["decision"]
                     decision["action"] = "flag_unbounded_cache"
                     decision["hitl_status"] = "human_rejected"
@@ -334,22 +352,29 @@ if mode == "🎮 Live Interactive Experiment":
 # -----------------------------------------------------------------------------
 # MODE 2: VIEW PAST AUDIT LOGS
 # -----------------------------------------------------------------------------
-else:
+elif mode == "📁 View Past Audit Logs":
     st.subheader("📁 Historical Audit Log Inspector")
     LOG_FILES = {
         "Unbounded Cache (Real GC)": "unbounded_cache_log.jsonl",
         "Cycle Generator (Real GC)": "cycle_generator_log.jsonl",
         "Normal Churn (Real GC)": "normal_churn_log.jsonl",
+        "Slow Leak (Real GC)": "slow_leak_log.jsonl",
+        "Bursty (Real GC)": "bursty_log.jsonl",
         "Unbounded Cache (Custom GC)": "unbounded_cache_custom_log.jsonl",
         "Cycle Generator (Custom GC)": "cycle_generator_custom_log.jsonl",
         "Normal Churn (Custom GC)": "normal_churn_custom_log.jsonl",
+        "Unbounded Cache (LLM Agent)": "unbounded_cache_llm_log.jsonl",
+        "Cycle Generator (LLM Agent)": "cycle_generator_llm_log.jsonl",
+        "Normal Churn (LLM Agent)": "normal_churn_llm_log.jsonl",
+        "Slow Leak (LLM Agent)": "slow_leak_llm_log.jsonl",
+        "Bursty (LLM Agent)": "bursty_llm_log.jsonl",
     }
 
     selected_log = st.selectbox("Select Log File", list(LOG_FILES.keys()))
     path = LOG_FILES[selected_log]
 
     if not os.path.exists(path):
-        st.warning(f"File `{path}` not found. Run `python main.py` or execute a live simulation first.")
+        st.warning(f"File `{path}` not found on disk. Run `python main.py` or execute a live simulation to generate it.")
     else:
         raw_logs = []
         timeline = []
@@ -373,7 +398,7 @@ else:
 
                 raw_logs.append({
                     "Timestamp": datetime.fromtimestamp(rec["pre"]["timestamp"]).strftime("%H:%M:%S"),
-                    "Diagnosis": dec.get("diagnosis", "GENERAL_GC"),
+                    "Diagnosis": dec.get("diagnosis", dec.get("hypothesis", "GENERAL_GC")),
                     "Action": dec.get("action", ""),
                     "HITL Governance": dec.get("hitl_status", "automated").replace("_", " ").title(),
                     "Items Reclaimed": reclaimed,
@@ -416,3 +441,37 @@ else:
             st.plotly_chart(fig, use_container_width=True)
 
             st.dataframe(df_logs, use_container_width=True)
+
+
+# -----------------------------------------------------------------------------
+# MODE 3: BENCHMARK EVALUATOR
+# -----------------------------------------------------------------------------
+else:
+    st.subheader("🏆 Phase V: Benchmark Evaluator & Ground Truth Scoring")
+    st.markdown(
+        """
+        The Evaluator scores each agent's decisions against known mathematical ground truth.
+        It detects **wasted collections** (collects that freed <5%), **false positives**, and **missed leaks**.
+        """
+    )
+
+    rows = compare()
+    if not rows:
+        st.warning("No evaluation logs found yet. Run `python main.py` first to generate benchmark logs.")
+    else:
+        df_eval = pd.DataFrame(rows)
+        st.dataframe(df_eval, use_container_width=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### Ground Truth Reference")
+            for k, v in GROUND_TRUTH.items():
+                st.write(f"- **`{k}`**: `{v}`")
+        with col2:
+            st.info(
+                "**Metrics Explained:**\n"
+                "- **Wasted Actions:** GC `collect()` calls that reclaimed less than 5% of memory.\n"
+                "- **False Positive:** Triggering mutations on a healthy workload (e.g. `normal_churn`).\n"
+                "- **Missed Leak:** Failing to identify or flag an unbounded/retention leak.\n"
+                "- **Total Pause (ms):** Cumulative latency overhead introduced by GC collections."
+            )

@@ -106,7 +106,15 @@ class AgenticGCAgent:
             f"{border}"
         )
 
+        if self.hitl_mode == "ui_manual":
+            # Delegated to UI layer (Streamlit buttons) - propose action for UI confirmation
+            return True
+
         if self.hitl_mode == "interactive":
+            # In headless environments (like Streamlit server or background tasks), do not hang on stdin
+            if not sys.stdin or not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
+                return True
+
             print(banner)
             try:
                 sys.stdout.write("Authorize intervention? [Y/n]: ")
