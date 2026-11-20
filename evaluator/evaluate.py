@@ -1,13 +1,3 @@
-"""
-Phase V evaluator: turns the JSONL action logs into comparable metrics.
-
-Log naming: <label>_log.jsonl (rule/agentic agent), <label>_llm_log.jsonl (LLM agent).
-
-CLI:
-    python -m evaluator.evaluate                # table: rule/agentic vs llm per workload
-    python -m evaluator.evaluate --report       # + LLM-written analysis (needs GROQ_API_KEY)
-"""
-
 import argparse
 import json
 import os
@@ -20,7 +10,8 @@ GROUND_TRUTH = {
     "slow_leak": "unbounded_retention",
     "bursty": "healthy",
 }
-MUTATING = {"collect", "tune_threshold"}
+MUTATING = {"collect", "tune_threshold", "evict_cache", "release_retained"}
+RECLAIM_ACTIONS = {"collect", "evict_cache", "release_retained"}
 FUTILE_RATIO = 0.05
 
 
@@ -53,39 +44,57 @@ def summarize_run(label, agent="rule", directory="."):
 
     freed_bytes = pause_ms = wasted = mutating = 0
     flags = []
-    for a in actions:
-        act = a["decision"]["action"]
-        pre, post = a["pre"]["traced_current_bytes"], a["post"]["traced_current_bytes"]
+    successful_reclaims = 0
+    for record in actions:
+        act = record["decision"]["action"]
+        pre = record["pre"]["traced_current_bytes"]
+        post = record["post"]["traced_current_bytes"]
         if act in MUTATING:
             mutating += 1
-            freed = pre - post
-            freed_bytes += freed
-            pause_ms += a["result"].get("duration_ms", 0.0)
-            if pre and freed / pre < FUTILE_RATIO:
-                wasted += 1
+            if act in RECLAIM_ACTIONS:
+                freed = max(0, pre - post)
+                freed_bytes += freed
+                pause_ms += record["result"].get("duration_ms", 0.0)
+                ratio = freed / pre if pre else 0.0
+                if ratio >= FUTILE_RATIO:
+                    successful_reclaims += 1
+                else:
+                    wasted += 1
         elif act.startswith("flag_"):
             flags.append(act)
-        elif act == "evict_cache":
-            # Count evictions as correct identification for unbounded_retention
-            flags.append("flag_leak")
 
-    correct_flag = ((truth == "unbounded_retention" and
-                     ("flag_leak" in flags or "evict_cache" in [a["decision"]["action"] for a in actions])) or
-                    (truth == "cycle_garbage" and ("flag_cycle" in flags or
-                                                   mutating > wasted)))
+    # Detection and remediation are deliberately separate. A flag is a
+    # diagnosis; it does not mean bytes were reclaimed.
+    if truth == "cycle_garbage":
+        detected = "flag_cycle" in flags or successful_reclaims > 0
+    elif truth == "unbounded_retention":
+        detected = "flag_leak" in flags or any(
+            a["decision"]["action"] in {"evict_cache", "release_retained"}
+            for a in actions)
+    else:
+        detected = not flags and mutating == 0
+
+    # Healthy workloads have no remediation target. N/A is different from
+    # False (which means an attempted/required remediation did not work).
+    remediation_success = None if truth == "healthy" else successful_reclaims > 0
+    false_positive = truth == "healthy" and (bool(flags) or mutating > 0)
     return {
         "label": label, "agent": agent, "ground_truth": truth,
         "observations": summary["total_observations"],
         "mutating_actions": mutating,
         "wasted_actions": wasted,
-        "false_positive": truth == "healthy" and mutating > 0,
-        "missed_leak": truth == "unbounded_retention" and not correct_flag,
-        "correct_flag": correct_flag,
+        "false_positive": false_positive,
+        "missed_leak": truth == "unbounded_retention" and not detected,
+        "correct_flag": detected,
+        "detection_correct": detected,
+        "remediation_success": remediation_success,
+        "successful_reclaims": successful_reclaims,
         "bytes_freed": freed_bytes,
         "total_pause_ms": round(pause_ms, 3),
         "bytes_freed_per_ms": round(freed_bytes / pause_ms, 1) if pause_ms else None,
-        "llm": {k: summary[k] for k in ("llm_calls", "fallbacks", "guard_overrides",
-                                        "avg_llm_latency_ms") if k in summary} or None,
+        "llm": {k: summary[k] for k in ("llm_calls", "api_attempts", "api_errors",
+                                        "validation_errors", "fallbacks", "rate_limit_skips",
+                                        "guard_overrides", "avg_llm_latency_ms") if k in summary} or None,
     }
 
 
@@ -101,12 +110,15 @@ def compare(labels=None, directory="."):
 
 
 def print_table(rows):
-    cols = ["label", "agent", "mutating_actions", "wasted_actions", "false_positive",
-            "missed_leak", "correct_flag", "bytes_freed", "total_pause_ms"]
+    cols = ["label", "agent", "detection_correct", "remediation_success",
+            "mutating_actions", "wasted_actions", "false_positive", "missed_leak",
+            "bytes_freed", "total_pause_ms"]
     widths = [max(len(c), *(len(str(r[c])) for r in rows)) for c in cols]
     print("  ".join(c.ljust(w) for c, w in zip(cols, widths)))
     for r in rows:
-        print("  ".join(str(r[c]).ljust(w) for c, w in zip(cols, widths)))
+        values = ["N/A" if r[c] is None and c == "remediation_success" else str(r[c])
+                  for c in cols]
+        print("  ".join(v.ljust(w) for v, w in zip(values, widths)))
 
 
 def narrate(rows, chat_fn):

@@ -1,10 +1,3 @@
-"""
-Phase VI: read-only FastAPI service over the run logs + evaluator.
-
-    pip install fastapi uvicorn  (already in requirements.txt)
-    uvicorn api.server:app --reload       # docs at http://127.0.0.1:8000/docs
-"""
-
 from fastapi import FastAPI, HTTPException
 
 from evaluator.evaluate import GROUND_TRUTH, compare, narrate, summarize_run

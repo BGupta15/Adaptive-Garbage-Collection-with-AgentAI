@@ -37,16 +37,35 @@ class Actuator:
             return {"objects_collected": freed, "duration_ms": round(pause_ms, 3)}
 
         elif action == "evict_cache":
-            # Human-approved application-level cache eviction
+            # Human-approved application-level cache eviction. Measure the
+            # entire intervention, not only the follow-up gc.collect().
+            t0 = time.perf_counter()
             ratio = decision.get("evict_ratio", 0.5)
             evicted = 0
             if target_workload and hasattr(target_workload, "evict"):
                 evicted = target_workload.evict(ratio=ratio)
-            t0 = time.perf_counter()
             freed = self.gc_module.collect()
             pause_ms = (time.perf_counter() - t0) * 1000
             return {
                 "evicted_items": evicted,
+                "objects_collected": freed,
+                "duration_ms": round(pause_ms, 3),
+            }
+
+        elif action == "release_retained":
+            # Application-level cleanup for a workload that explicitly
+            # implements release_retained(). Generic gc.collect() cannot free
+            # reachable objects; this adapter removes the workload's roots.
+            t0 = time.perf_counter()
+            ratio = max(0.10, min(0.75, float(decision.get("release_ratio", 0.50))))
+            released = 0
+            if target_workload and callable(getattr(target_workload, "release_retained", None)):
+                released = target_workload.release_retained(ratio=ratio)
+            freed = self.gc_module.collect()
+            pause_ms = (time.perf_counter() - t0) * 1000
+            return {
+                "released_items": released,
+                "release_ratio": ratio,
                 "objects_collected": freed,
                 "duration_ms": round(pause_ms, 3),
             }

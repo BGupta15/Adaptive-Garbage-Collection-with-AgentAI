@@ -1,25 +1,3 @@
-"""
-In-process monitor: samples gc/tracemalloc/psutil state while a workload
-generator runs, interleaved on the same thread.
-
-Key design decision: actuator actions are isolated with an explicit
-`action_in_progress` flag rather than mixed synchronously into the regular
-sampling loop. This is NOT a threading lock -- there's no concurrency here,
-it's a single-threaded state guard whose only job is to let us tag samples
-as "observation" vs "action_pre" / "action_post" so before/after comparisons
-aren't contaminated by regular sampling noise.
-
-OVERHEAD FIX (from friend's review): every stored sample retains ~1.6 KB of
-tracemalloc-traced memory. Without subtracting this, every workload -- even a
-perfectly healthy one -- shows fake steady growth of ~16 KB/s. The monitor now
-tracks and subtracts its own overhead so the numbers seen by the analysis and
-agent reflect the WORKLOAD's memory, not the monitor's bookkeeping.
-
-BACKEND SWAP: `gc_module` defaults to the real interpreter's `gc`, but
-accepts any module shaped the same way -- in particular, our own
-`custom_gc` package (see custom_gc/heap.py).
-"""
-
 import gc as _real_gc
 import os
 import time
@@ -86,23 +64,23 @@ class Monitor:
         workload_module: passed through to actuator for evict actions
         workload_name: passed through to agent for context
         """
-        for _workload_step_info in workload_gen:
+        for workload_step, _workload_step_info in enumerate(workload_gen, start=1):
             if self.action_in_progress:
                 continue
 
             self.sample(tag="observation")
-
-            try:
-                decision = agent_decide_fn(self.samples, workload_name=workload_name)
-            except TypeError:
-                decision = agent_decide_fn(self.samples)
+            # All agent implementations share this call contract. Avoid catching
+            # TypeError here: it could hide a real bug raised inside an agent.
+            decision = agent_decide_fn(self.samples, workload_name=workload_name)
 
             if decision.get("action") != "noop":
                 self._apply_action(decision, actuator, workload_module=workload_module)
 
             time.sleep(self.sample_interval)
 
-            if len(self.samples) >= max_steps:
+            # Count workload yields, not observation + action_pre + action_post
+            # snapshots. Both agents now receive the same number of steps.
+            if workload_step >= max_steps:
                 break
 
     def _apply_action(self, decision, actuator, workload_module=None):

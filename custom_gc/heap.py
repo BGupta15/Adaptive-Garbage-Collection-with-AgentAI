@@ -1,31 +1,3 @@
-"""
-A real mark-sweep garbage collector, implemented from scratch -- this is
-the piece that answers "you didn't build a GC, you built automation
-around one" from an evaluator. GCObject/Heap here are OUR data structures
-and OUR algorithm, not a wrapper around Python's real gc.
-
-Design: objects live in `Heap.objects` (a dict keyed by id). Each object
-can hold references to other objects. A subset of objects are marked as
-"roots" -- things considered reachable from outside the heap (like a
-stack frame or a global variable would be in a real language runtime).
-collect() does a standard two-phase mark-sweep:
-  1. Mark: starting from roots, walk the reference graph, marking every
-     object reachable.
-  2. Sweep: delete every object that was NOT marked -- these are
-     unreachable, i.e. garbage, possibly forming reference cycles.
-
-IMPORTANT GOTCHA (confirmed while building this): GCObject instances are
-still real Python objects. If two of them reference each other (a cycle)
-and neither is a Python-level root, that's ALSO a real cycle in CPython's
-own object graph -- meaning Python's actual built-in gc could collect it
-in the background, independent of whether OUR collect() ever runs. That
-would make our own collector's behavior look wrong (e.g. "we called
-collect() and it froze zero objects" when real gc already silently freed
-them first). To keep this simulation's results meaningful, real gc is
-disabled at import time below -- everything must go through OUR collect()
-to actually get freed while this module is in use.
-"""
-
 import gc as _real_gc
 
 # Disable CPython's own cyclic collector so it can't silently clean up

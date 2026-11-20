@@ -1,12 +1,3 @@
-"""
-Runs the same Agentic GC pipeline as main.py, but pointed at OUR OWN
-mark-sweep collector (custom_gc) instead of the real interpreter's gc module.
-
-Usage:
-    python main_custom_gc.py
-    python main_custom_gc.py --hitl interactive
-"""
-
 import argparse
 import functools
 

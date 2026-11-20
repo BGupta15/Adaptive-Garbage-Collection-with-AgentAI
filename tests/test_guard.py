@@ -37,3 +37,21 @@ def test_max_actions_blocks_mutation_but_not_flags():
     assert enforce_rails(GOOD, [], 0, actions_taken=10)["action"] == "noop"
     flag = {**GOOD, "action": "flag_leak"}
     assert enforce_rails(flag, [], 0, actions_taken=10)["action"] == "flag_leak"
+
+
+def test_evict_cache_requires_bounded_ratio():
+    raw = {"action": "evict_cache", "reason": "persistent cache growth",
+           "hypothesis": "unbounded_retention", "confidence": 0.9,
+           "evict_ratio": 0.25}
+    assert validate(raw)["evict_ratio"] == 0.25
+    with pytest.raises(ValueError):
+        validate({**raw, "evict_ratio": 0.9})
+
+
+def test_release_retained_requires_bounded_ratio():
+    raw = {"action": "release_retained", "reason": "persistent referenced leak",
+           "hypothesis": "unbounded_retention", "confidence": 0.9,
+           "release_ratio": 0.5}
+    assert validate(raw)["release_ratio"] == 0.5
+    with pytest.raises(ValueError):
+        validate({**raw, "release_ratio": 0.9})

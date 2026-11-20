@@ -1,22 +1,3 @@
-"""
-Statistical feature layer. Turns raw monitor samples into a small, fixed
-set of numbers the LLM agent reasons over -- the LLM never sees raw
-samples, only these features.
-
-Why these features (and not just growth rate): growth rate alone can't
-tell a leak from garbage that simply hasn't been collected yet. The
-separating signals are:
-
-  * trend strength (r2)  -> steady trend vs noisy bursts
-  * floor slope          -> does the LOW point between collections keep
-                            rising? Garbage gets reclaimed (floor flat);
-                            a leak is retained (floor rises)
-  * action effectiveness -> what did previous collect() calls actually free?
-
-Scale-free features (r2, floor_ratio) are preferred over absolute B/s
-wherever possible, because absolute B/s depends on sample_interval.
-"""
-
 import statistics
 import tracemalloc
 
@@ -155,7 +136,13 @@ def suspicion_score(f):
         return 0.0
 
     trend = 0.0
-    if f["traced_slope_bps"] > 0 and f["window_growth_pct"] >= 5:
+    # Do not require 5% growth in a short rolling window: a real slow leak
+    # can be highly linear and persistent while adding less than 5%.
+    # R2 + rising floor distinguish this from short-lived burst spikes.
+    if (f["traced_slope_bps"] > 1_000
+            and f["trend_r2"] >= 0.85
+            and f["floor_ratio"] >= 0.60
+            and f["window_growth_pct"] >= 0.25):
         persistence = max(0.0, min(1.0, f["floor_ratio"]))
         trend = f["trend_r2"] * (0.5 + 0.5 * persistence)
 

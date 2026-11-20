@@ -48,6 +48,8 @@ def run_experiment(workload_module, label, agent_name="agentic", chat_fn=None,
         llm_agent_obj = LLMAgent(chat_fn)
         agent_decide_fn = llm_agent_obj.decide
     elif agent_name == "rule":
+        from agent.rule_based import reset as reset_rule_agent
+        reset_rule_agent()
         agent_decide_fn = functools.partial(rule_decide, analysis_fn=analyze)
     else:  # agentic (default)
         agent = get_agent(hitl_mode=hitl_mode)
@@ -70,7 +72,7 @@ def run_experiment(workload_module, label, agent_name="agentic", chat_fn=None,
 
     print(f"\n[Completed {label}]")
     print(f"  Total observation samples:  {len(obs)}")
-    print(f"  Agent interventions taken:  {len(actions)}")
+    print(f"  Non-noop decisions recorded: {len(actions)}")
     if extra:
         print(f"  LLM stats:                  {extra}")
     print(f"  Audit log recorded:         {log_path}")

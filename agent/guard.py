@@ -1,13 +1,5 @@
-"""
-Validation + hard safety rails for ANY agent's decision (LLM or rule).
-
-The LLM proposes; this module disposes. Everything here is plain code the
-model cannot talk its way around -- that is the point of keeping it out
-of the prompt.
-"""
-
-ALLOWED_ACTIONS = {"collect", "tune_threshold", "flag_cycle", "flag_leak", "noop"}
-MUTATING = {"collect", "tune_threshold"}      # actually change interpreter state
+ALLOWED_ACTIONS = {"collect", "evict_cache", "release_retained", "tune_threshold", "flag_cycle", "flag_leak", "noop"}
+MUTATING = {"collect", "evict_cache", "release_retained", "tune_threshold"}  # change runtime/application state
 HYPOTHESES = {"cycle_garbage", "unbounded_retention", "bursty", "healthy", "unknown"}
 
 MAX_ACTIONS = 8          # mutating actions allowed per run
@@ -55,6 +47,20 @@ def validate(raw):
         if isinstance(t, bool) or not isinstance(t, int):
             raise DecisionError("tune_threshold needs an integer 'threshold'")
         clean["threshold"] = t           # actuator clamps to its own bounds as well
+    if action == "evict_cache":
+        ratio = raw.get("evict_ratio", 0.25)
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+            raise DecisionError("evict_cache needs a numeric evict_ratio")
+        if not 0.05 <= float(ratio) <= 0.50:
+            raise DecisionError("evict_ratio must be between 0.05 and 0.50")
+        clean["evict_ratio"] = float(ratio)
+    if action == "release_retained":
+        ratio = raw.get("release_ratio", 0.50)
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+            raise DecisionError("release_retained needs a numeric release_ratio")
+        if not 0.10 <= float(ratio) <= 0.75:
+            raise DecisionError("release_ratio must be between 0.10 and 0.75")
+        clean["release_ratio"] = float(ratio)
     if isinstance(raw.get("recommendation"), str):
         clean["recommendation"] = raw["recommendation"].strip()[:300]
     return clean
@@ -84,7 +90,7 @@ def enforce_rails(decision, history, futile_streak, actions_taken):
                           f"confidence {decision['confidence']:.2f} below {MIN_CONFIDENCE}")
     # Futility: repeated collects that freed ~nothing mean the memory is
     # referenced, not garbage. Stop collecting and report instead.
-    if decision["action"] == "collect" and futile_streak >= FUTILE_LIMIT:
+    if decision["action"] in {"collect", "release_retained"} and futile_streak >= FUTILE_LIMIT:
         return _downgrade(decision, "flag_leak",
-                          f"last {futile_streak} collects reclaimed <5%; memory is retained")
+                          f"last {futile_streak} reclaim actions recovered <5%; memory remains retained")
     return decision

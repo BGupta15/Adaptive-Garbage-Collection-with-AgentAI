@@ -1,21 +1,3 @@
-"""
-Agentic GC Decision Layer: Intelligent, multi-signal cognitive agent with
-Human-in-the-Loop (HITL) safety governance.
-
-Replaces static thresholds with dynamic diagnosis:
-1. Distinguishes between:
-   - Cyclic reference leaks (collectable via generational/mark-sweep GC)
-   - Unbounded retention / cache leaks (NOT collectable by GC; requires eviction)
-   - Allocation frequency pressure (tunable via GC thresholds)
-   - Healthy baseline churn (requires no intervention)
-2. Enforces Human-in-the-Loop (HITL) permission gates:
-   - Safe, non-destructive actions (gc.collect, minor threshold tuning) are AUTOMATED.
-   - High-impact, application-state altering actions (cache eviction/purging) REQUIRE HUMAN APPROVAL.
-3. Supports dual reasoning modes:
-   - Built-in Cognitive Reasoner: 100% offline, deterministic, multi-variate signal synthesis.
-   - Optional LLM Provider: Connects to Groq / OpenAI / Gemini if an API key is set in .env.
-"""
-
 import os
 import sys
 import time
@@ -30,14 +12,7 @@ class AgenticGCAgent:
         growth_threshold_bytes_per_sec: float = 40_000,
         cooldown_seconds: float = 3.0,
     ):
-        """
-        hitl_mode options:
-          - "interactive": Prompts the human operator via terminal input (Y/N).
-          - "auto-approve": Simulates an authorized human operator approving the action
-                           (ideal for automated runs & demos while logging the HITL gate).
-          - "auto-reject": Simulates human operator declining the intervention
-                           (demonstrates safe backoff behavior).
-        """
+       
         self.hitl_mode = hitl_mode
         self.growth_threshold = growth_threshold_bytes_per_sec
         self.cooldown_seconds = cooldown_seconds
@@ -201,7 +176,7 @@ class AgenticGCAgent:
                     "diagnosis": diagnosis,
                     "reason": reason + " [Human Approved]",
                     "hitl_status": "human_approved",
-                    "evict_ratio": 0.5,
+                    "evict_ratio": 0.3,
                 }
             else:
                 return {
